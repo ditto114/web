@@ -23,8 +23,9 @@ import sys
 import time
 from html.parser import HTMLParser
 from typing import Iterable, List, Optional, Tuple
+from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 BASE_URL = "https://maplestoryworlds.nexon.com"
 PROFILE_URL = BASE_URL + "/ko/profile/{code}"
@@ -34,6 +35,12 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0 Safari/537.36"
 )
+DEFAULT_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Connection": "keep-alive",
+}
 FRIEND_CODE_PATTERN = re.compile(r"^/profile/([A-Za-z0-9]{5})$")
 
 
@@ -76,11 +83,19 @@ class FriendListParser(HTMLParser):
             self._current_ppsn = None
 
 
-def fetch(url: str) -> str:
+_cookie_jar = CookieJar()
+_opener = build_opener(HTTPCookieProcessor(_cookie_jar))
+
+
+def fetch(url: str, *, referer: Optional[str] = None, timeout: float = 10.0) -> str:
     """지정된 URL의 HTML을 반환합니다."""
 
-    request = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(request) as response:
+    headers = dict(DEFAULT_HEADERS)
+    if referer:
+        headers["Referer"] = referer
+
+    request = Request(url, headers=headers)
+    with _opener.open(request, timeout=timeout) as response:
         charset = response.headers.get_content_charset() or "utf-8"
         return response.read().decode(charset, "ignore")
 
@@ -101,7 +116,7 @@ def extract_entries_from_friends_page(html: str) -> List[Tuple[str, str]]:
 
 def get_initial_friends(target_code: str) -> List[str]:
     profile_url = PROFILE_URL.format(code=target_code)
-    html = fetch(profile_url)
+    html = fetch(profile_url, referer=BASE_URL + "/")
     codes = extract_friend_codes_from_profile(html)
     if not codes:
         raise RuntimeError(
@@ -114,10 +129,11 @@ def get_initial_friends(target_code: str) -> List[str]:
 def iter_friend_pages(friend_code: str, *, delay: float = 0.5) -> Iterable[List[Tuple[str, str]]]:
     page = 1
     seen_empty = 0
+    referer = PROFILE_URL.format(code=friend_code)
     while True:
         url = FRIENDS_PAGE_URL.format(code=friend_code, page=page)
         try:
-            html = fetch(url)
+            html = fetch(url, referer=referer)
         except HTTPError as exc:
             if exc.code == 404:
                 break
@@ -131,6 +147,7 @@ def iter_friend_pages(friend_code: str, *, delay: float = 0.5) -> Iterable[List[
             seen_empty = 0
             yield entries
         page += 1
+        referer = url
         if delay:
             time.sleep(delay)
 
